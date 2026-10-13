@@ -1,0 +1,20 @@
+[package]
+name = "opentelemetry-rare-error-sampling"
+version = "0.1.0"
+edition = "2024"
+description = "In-process tail sampling for OpenTelemetry: export every error span plus a head-sampled share of the rest"
+repository = "https://github.com/valkum/otel-rare-error-sampling-rust"
+license = "MIT OR Apache-2.0"
+keywords = ["opentelemetry", "tracing", "sampling", "tail-sampling"]
+categories = ["development-tools::debugging"]
+
+[dependencies]
+opentelemetry = { version = "0.33", default-features = false, features = ["trace"] }
+opentelemetry_sdk = { version = "0.33", default-features = false, features = ["trace"] }
+
+[dev-dependencies]
+opentelemetry_sdk = { version = "0.33", default-features = false, features = ["trace", "testing"] }
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
