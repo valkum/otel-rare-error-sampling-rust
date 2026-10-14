@@ -20,8 +20,9 @@ use opentelemetry_sdk::{
     Resource,
     error::OTelSdkResult,
     trace::{
-        IdGenerator, InMemorySpanExporter, ParentBasedSampler, Sampler, SdkTracerProvider,
-        ShouldSample, SimpleSpanProcessor, Span, SpanData, SpanProcessor,
+        BatchConfigBuilder, BatchSpanProcessor, IdGenerator, InMemorySpanExporter,
+        ParentBasedSampler, Sampler, SdkTracerProvider, ShouldSample, SimpleSpanProcessor, Span,
+        SpanData, SpanExporter, SpanProcessor,
     },
 };
 
@@ -48,6 +49,61 @@ impl IdGenerator for FixedIds {
 
     fn new_span_id(&self) -> SpanId {
         SpanId::from(self.next_span_id.fetch_add(1, Ordering::Relaxed))
+    }
+}
+
+/// Gives the root spans the trace ids of `trace_ids` in sequence. The span
+/// ids increase by 1.
+#[derive(Debug)]
+pub struct SequenceIds {
+    trace_ids: Vec<TraceId>,
+    next_trace: AtomicUsize,
+    next_span_id: AtomicU64,
+}
+
+impl SequenceIds {
+    pub fn new(trace_ids: Vec<TraceId>) -> Self {
+        Self {
+            trace_ids,
+            next_trace: AtomicUsize::new(0),
+            next_span_id: AtomicU64::new(1),
+        }
+    }
+}
+
+impl IdGenerator for SequenceIds {
+    fn new_trace_id(&self) -> TraceId {
+        let index = self.next_trace.fetch_add(1, Ordering::Relaxed);
+        self.trace_ids[index % self.trace_ids.len()]
+    }
+
+    fn new_span_id(&self) -> SpanId {
+        SpanId::from(self.next_span_id.fetch_add(1, Ordering::Relaxed))
+    }
+}
+
+/// An exporter that keeps the exported spans, also after shutdown.
+#[derive(Debug, Clone, Default)]
+pub struct CollectingExporter {
+    pub spans: Arc<Mutex<Vec<SpanData>>>,
+    pub shut_down: Arc<AtomicUsize>,
+}
+
+impl CollectingExporter {
+    pub fn spans(&self) -> Vec<SpanData> {
+        self.spans.lock().unwrap().clone()
+    }
+}
+
+impl SpanExporter for CollectingExporter {
+    async fn export(&self, batch: Vec<SpanData>) -> OTelSdkResult {
+        self.spans.lock().unwrap().extend(batch);
+        Ok(())
+    }
+
+    fn shutdown_with_timeout(&self, _timeout: Duration) -> OTelSdkResult {
+        self.shut_down.fetch_add(1, Ordering::Relaxed);
+        Ok(())
     }
 }
 
@@ -158,6 +214,29 @@ pub fn root_with_children(harness: &Harness, parent: &Context) {
     failed.set_status(Status::error("boom"));
     failed.end();
     cx.span().end();
+}
+
+/// A `BatchSpanProcessor` with a queue that holds all spans of a test. So
+/// the batch processor drops no span.
+pub fn batch_processor(exporter: &CollectingExporter) -> BatchSpanProcessor {
+    BatchSpanProcessor::builder(exporter.clone())
+        .with_batch_config(
+            BatchConfigBuilder::default()
+                .with_max_queue_size(16_384)
+                .build(),
+        )
+        .build()
+}
+
+/// Returns `count` trace ids. Each 4th trace id has high randomness, so a
+/// ratio of 0.25 samples it. The other trace ids have low randomness.
+pub fn one_in_four_sampled(count: usize) -> Vec<TraceId> {
+    (0..count)
+        .map(|i| {
+            let randomness: u128 = if i % 4 == 0 { 0xff_ffff_ffff_ffff } else { 1 };
+            TraceId::from(((i as u128 + 1) << 64) | randomness)
+        })
+        .collect()
 }
 
 /// A trace id with the randomness `ffffffffffffff`. All ratios above 0 sample
