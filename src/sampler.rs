@@ -12,8 +12,9 @@ use crate::tracestate::{self, MAX_PRECISION};
 /// changes a [`SamplingDecision::Drop`] of the root sampler to
 /// [`SamplingDecision::RecordOnly`]. Other decisions do not change.
 ///
-/// The SDK calls the span processors for all recorded spans. Thus a span
-/// processor can sample a span when the span ends with an error.
+/// The SDK calls the span processors for all recorded spans. So
+/// [`ErrorSamplingProcessor`](crate::ErrorSamplingProcessor) can sample a span
+/// when the span ends with an error.
 ///
 /// Use it around a parent-based sampler:
 ///
