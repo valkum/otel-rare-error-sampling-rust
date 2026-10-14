@@ -13,8 +13,13 @@ opentelemetry = { version = "0.33", default-features = false, features = ["trace
 opentelemetry_sdk = { version = "0.33", default-features = false, features = ["trace"] }
 
 [dev-dependencies]
+criterion = { version = "0.8", default-features = false }
 opentelemetry_sdk = { version = "0.33", default-features = false, features = ["trace", "testing"] }
 
 [package.metadata.docs.rs]
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
+
+[[bench]]
+name = "hot_path"
+harness = false
