@@ -1,6 +1,6 @@
 use opentelemetry::{
     Context, KeyValue,
-    trace::{Link, SpanKind, TraceContextExt, TraceId},
+    trace::{Link, SpanKind, TraceContextExt, TraceId, TraceState},
 };
 use opentelemetry_sdk::trace::{SamplingDecision, SamplingResult, ShouldSample};
 
@@ -84,9 +84,10 @@ impl<S: ShouldSample + Clone + 'static> ShouldSample for AlwaysRecordSampler<S> 
 #[derive(Clone, Debug)]
 pub struct ProbabilitySampler {
     ratio: f64,
-    /// The rejection threshold and the encoded threshold. `None` when the
-    /// sampler samples no span.
-    sampled: Option<(u64, Box<str>)>,
+    /// The rejection threshold, the encoded threshold, and a `tracestate`
+    /// that holds only `ot=th:<threshold>`. `None` when the sampler samples
+    /// no span.
+    sampled: Option<(u64, Box<str>, TraceState)>,
 }
 
 impl ProbabilitySampler {
@@ -107,7 +108,12 @@ impl ProbabilitySampler {
         let sampled = tracestate::probability_to_threshold(ratio, precision.min(MAX_PRECISION))
             .map(|threshold| {
                 let encoded = tracestate::encode_threshold(threshold);
-                (threshold, encoded.into_boxed_str())
+                // Root spans have an empty parent `tracestate`. Make their
+                // `tracestate` one time. Then each sampled root span only
+                // clones it.
+                let trace_state = tracestate::with_threshold(&TraceState::NONE, &encoded)
+                    .expect("an encoded threshold is a valid tracestate value");
+                (threshold, encoded.into_boxed_str(), trace_state)
             });
         Self { ratio, sampled }
     }
@@ -115,7 +121,7 @@ impl ProbabilitySampler {
     /// Returns the encoded `th` value, or `None` when the sampler samples no
     /// span.
     pub fn threshold(&self) -> Option<&str> {
-        self.sampled.as_ref().map(|(_, encoded)| &**encoded)
+        self.sampled.as_ref().map(|(_, encoded, _)| &**encoded)
     }
 }
 
@@ -129,27 +135,32 @@ impl ShouldSample for ProbabilitySampler {
         _attributes: &[KeyValue],
         _links: &[Link],
     ) -> SamplingResult {
-        let trace_state = parent_context
+        let span = parent_context
             .filter(|cx| cx.has_active_span())
-            .map(|cx| cx.span().span_context().trace_state().clone())
-            .unwrap_or_default();
-
-        let sampled = self
-            .sampled
+            .map(|cx| cx.span());
+        let trace_state = span
             .as_ref()
-            .filter(|(threshold, _)| tracestate::randomness(trace_id, &trace_state) >= *threshold);
-        match sampled {
-            Some((_, encoded)) => SamplingResult {
-                decision: SamplingDecision::RecordAndSample,
-                attributes: Vec::new(),
-                trace_state: tracestate::with_threshold(&trace_state, encoded)
-                    .unwrap_or(trace_state),
-            },
-            None => SamplingResult {
+            .map_or(&TraceState::NONE, |span| span.span_context().trace_state());
+
+        let sampled = self.sampled.as_ref().filter(|(threshold, _, _)| {
+            tracestate::randomness(trace_id, trace_state) >= *threshold
+        });
+        let Some((_, encoded, sampled_state)) = sampled else {
+            return SamplingResult {
                 decision: SamplingDecision::Drop,
                 attributes: Vec::new(),
-                trace_state,
-            },
+                trace_state: trace_state.clone(),
+            };
+        };
+        let trace_state = if *trace_state == TraceState::NONE {
+            sampled_state.clone()
+        } else {
+            tracestate::with_threshold(trace_state, encoded).unwrap_or_else(|| trace_state.clone())
+        };
+        SamplingResult {
+            decision: SamplingDecision::RecordAndSample,
+            attributes: Vec::new(),
+            trace_state,
         }
     }
 }
