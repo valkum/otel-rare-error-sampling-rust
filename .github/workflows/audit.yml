@@ -1,0 +1,22 @@
+name: Security audit
+
+on:
+  schedule:
+    # Runs at 00:00 UTC everyday
+    - cron: '0 0 * * *'
+  push:
+    paths:
+      - '**/Cargo.toml'
+      - '**/Cargo.lock'
+  pull_request:
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: EmbarkStudios/cargo-deny-action@bb137d7af7e4fb67e5f82a49c4fce4fad40782fe # v2.0.20
+        with:
+          rust-version: 1.93.1
+
