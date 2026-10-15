@@ -179,6 +179,20 @@ fn later_spans_of_a_kept_trace_are_exported() {
 }
 
 #[test]
+fn zero_max_kept_traces_turns_off_the_decisions() {
+    let harness = Harness::with_processor(sampler(0.0), LOW_RANDOMNESS, |inner| {
+        TraceErrorSamplingProcessor::new(inner).with_max_kept_traces(0)
+    });
+    let tracer = harness.provider.tracer("test");
+
+    fail_trace(&tracer, LOW_RANDOMNESS);
+    later_span(&tracer, LOW_RANDOMNESS, "later");
+
+    // The processor remembers no error, so the later span is dropped.
+    assert_eq!(harness.names(), ["failed"]);
+}
+
+#[test]
 fn later_spans_of_a_dropped_trace_are_dropped() {
     let harness = harness(0.0, LOW_RANDOMNESS);
 
@@ -467,6 +481,15 @@ fn harness(ratio: f64, trace_id: TraceId) -> Harness {
 
 fn fail(span: &mut impl Span) {
     span.set_status(Status::error("boom"));
+}
+
+/// Ends a root span of `trace_id` with an error. The span has a remote parent
+/// that is not sampled.
+fn fail_trace(tracer: &opentelemetry_sdk::trace::SdkTracer, trace_id: TraceId) {
+    let parent = remote_parent(trace_id, false, "");
+    let mut span = tracer.start_with_context("failed", &parent);
+    fail(&mut span);
+    span.end();
 }
 
 /// Ends a span of `trace_id` without an error, after its local trace ended.

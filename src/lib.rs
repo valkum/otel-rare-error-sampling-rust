@@ -12,6 +12,6 @@ pub use error::DEFAULT_STATUS_ATTRIBUTE;
 pub use processor::ErrorSamplingProcessor;
 pub use sampler::{AlwaysRecordSampler, DEFAULT_PRECISION, ProbabilitySampler};
 pub use trace_processor::{
-    DEFAULT_MAX_SPANS_PER_TRACE, DEFAULT_MAX_TRACES, DEFAULT_TRACE_TIMEOUT,
-    TraceErrorSamplingProcessor,
+    DEFAULT_MAX_KEPT_TRACES, DEFAULT_MAX_SPANS_PER_TRACE, DEFAULT_MAX_TRACES,
+    DEFAULT_TRACE_TIMEOUT, MAX_KEPT_TRACES, TraceErrorSamplingProcessor,
 };
