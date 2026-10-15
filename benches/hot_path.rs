@@ -1,7 +1,8 @@
 use std::{
     borrow::Cow,
     hint::black_box,
-    time::{Duration, SystemTime},
+    thread,
+    time::{Duration, Instant, SystemTime},
 };
 
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
@@ -13,7 +14,7 @@ use opentelemetry::{
     },
 };
 use opentelemetry_rare_error_sampling::{
-    AlwaysRecordSampler, ErrorSamplingProcessor, ProbabilitySampler,
+    AlwaysRecordSampler, ErrorSamplingProcessor, ProbabilitySampler, TraceErrorSamplingProcessor,
 };
 use opentelemetry_sdk::{
     error::OTelSdkResult,
@@ -23,7 +24,15 @@ use opentelemetry_sdk::{
     },
 };
 
-criterion_group!(benches, processor, sampler, end_to_end);
+criterion_group!(
+    benches,
+    processor,
+    sampler,
+    end_to_end,
+    end_to_end_with_open_traces,
+    large_traces,
+    contended
+);
 criterion_main!(benches);
 
 /// A processor that drops all spans. Use it to measure only the cost of the
@@ -167,6 +176,24 @@ fn end_to_end(c: &mut Criterion) {
                 .build(),
         ),
         (
+            "trace_processor_ratio_0.25",
+            SdkTracerProvider::builder()
+                .with_sampler(AlwaysRecordSampler::new(Sampler::parent_based(
+                    ProbabilitySampler::new(0.25),
+                )))
+                .with_span_processor(TraceErrorSamplingProcessor::new(Noop))
+                .build(),
+        ),
+        (
+            "trace_processor_ratio_0",
+            SdkTracerProvider::builder()
+                .with_sampler(AlwaysRecordSampler::new(Sampler::parent_based(
+                    ProbabilitySampler::new(0.0),
+                )))
+                .with_span_processor(TraceErrorSamplingProcessor::new(Noop))
+                .build(),
+        ),
+        (
             "always_on",
             SdkTracerProvider::builder()
                 .with_sampler(Sampler::AlwaysOn)
@@ -177,6 +204,138 @@ fn end_to_end(c: &mut Criterion) {
     for (name, provider) in &providers {
         let tracer = provider.tracer("bench");
         group.bench_function(*name, |b| b.iter(|| trace(&tracer)));
+    }
+    group.finish();
+}
+
+/// Measures a trace while 1000 other traces are open. The open traces fill
+/// the shards of `TraceErrorSamplingProcessor`.
+fn end_to_end_with_open_traces(c: &mut Criterion) {
+    let mut group = c.benchmark_group("trace_with_1000_open");
+    let sampler = || AlwaysRecordSampler::new(Sampler::parent_based(ProbabilitySampler::new(0.25)));
+    let providers = [
+        (
+            "error_sampling_processor",
+            SdkTracerProvider::builder()
+                .with_sampler(sampler())
+                .with_span_processor(ErrorSamplingProcessor::new(Noop))
+                .build(),
+        ),
+        (
+            "trace_processor",
+            SdkTracerProvider::builder()
+                .with_sampler(sampler())
+                .with_span_processor(TraceErrorSamplingProcessor::new(Noop))
+                .build(),
+        ),
+    ];
+    for (name, provider) in &providers {
+        let tracer = provider.tracer("bench");
+        let open: Vec<_> = (0..1000).map(|_| tracer.start("open")).collect();
+        group.bench_function(*name, |b| b.iter(|| trace(&tracer)));
+        drop(open);
+    }
+    group.finish();
+}
+
+/// Measures traces with 50 and 100 spans, with and without an error.
+fn large_traces(c: &mut Criterion) {
+    let mut group = c.benchmark_group("large_trace");
+    let sampler = || AlwaysRecordSampler::new(Sampler::parent_based(ProbabilitySampler::new(0.25)));
+    let providers = [
+        (
+            "sdk_parent_based_ratio_0.25",
+            SdkTracerProvider::builder()
+                .with_sampler(Sampler::ParentBased(Box::new(Sampler::TraceIdRatioBased(
+                    0.25,
+                ))))
+                .with_span_processor(Noop)
+                .build(),
+        ),
+        (
+            "error_sampling_processor",
+            SdkTracerProvider::builder()
+                .with_sampler(sampler())
+                .with_span_processor(ErrorSamplingProcessor::new(Noop))
+                .build(),
+        ),
+        (
+            "trace_processor",
+            SdkTracerProvider::builder()
+                .with_sampler(sampler())
+                .with_span_processor(TraceErrorSamplingProcessor::new(Noop))
+                .build(),
+        ),
+    ];
+    for spans in [50, 100] {
+        for (name, provider) in &providers {
+            let tracer = provider.tracer("bench");
+            for fail in [false, true] {
+                let outcome = if fail { "error" } else { "ok" };
+                group.bench_function(format!("{spans}_spans/{name}/{outcome}"), |b| {
+                    b.iter(|| large_trace(&tracer, spans, fail))
+                });
+            }
+        }
+    }
+    group.finish();
+}
+
+/// Measures the wall time for each trace while 8 threads make traces with
+/// the same provider. The threads compete for the shard locks.
+fn contended(c: &mut Criterion) {
+    const THREADS: u64 = 8;
+    let mut group = c.benchmark_group("contended_8_threads");
+    let sampler = || AlwaysRecordSampler::new(Sampler::parent_based(ProbabilitySampler::new(0.25)));
+    let providers = [
+        (
+            "sdk_parent_based_ratio_0.25",
+            SdkTracerProvider::builder()
+                .with_sampler(Sampler::ParentBased(Box::new(Sampler::TraceIdRatioBased(
+                    0.25,
+                ))))
+                .with_span_processor(Noop)
+                .build(),
+        ),
+        (
+            "error_sampling_processor",
+            SdkTracerProvider::builder()
+                .with_sampler(sampler())
+                .with_span_processor(ErrorSamplingProcessor::new(Noop))
+                .build(),
+        ),
+        (
+            "trace_processor",
+            SdkTracerProvider::builder()
+                .with_sampler(sampler())
+                .with_span_processor(TraceErrorSamplingProcessor::new(Noop))
+                .build(),
+        ),
+    ];
+    for spans in [2, 50] {
+        for (name, provider) in &providers {
+            let tracer = provider.tracer("bench");
+            group.bench_function(format!("{spans}_spans/{name}"), |b| {
+                b.iter_custom(|iters| {
+                    let per_thread = iters.div_ceil(THREADS);
+                    let start = Instant::now();
+                    thread::scope(|scope| {
+                        for _ in 0..THREADS {
+                            scope.spawn(|| {
+                                for _ in 0..per_thread {
+                                    if spans == 2 {
+                                        trace(&tracer);
+                                    } else {
+                                        large_trace(&tracer, spans, false);
+                                    }
+                                }
+                            });
+                        }
+                    });
+                    start.elapsed()
+                })
+            });
+        }
     }
     group.finish();
 }
@@ -247,6 +406,44 @@ fn trace(tracer: &opentelemetry_sdk::trace::SdkTracer) {
     child.set_attribute(KeyValue::new("db.rows", 10));
     child.end();
     cx.span().end();
+}
+
+/// Starts and ends a trace with `spans` spans: a root span, 10 middle spans,
+/// and leaf spans below the middle spans. When `fail` is `true`, the last leaf
+/// span ends with an error.
+fn large_trace(tracer: &opentelemetry_sdk::trace::SdkTracer, spans: usize, fail: bool) {
+    const MIDDLE: usize = 10;
+    let root = Context::current_with_span(
+        tracer
+            .span_builder("root")
+            .with_attributes(attributes())
+            .start(tracer),
+    );
+    let middle: Vec<Context> = (0..MIDDLE)
+        .map(|_| {
+            root.with_span(
+                tracer
+                    .span_builder("middle")
+                    .with_attributes(attributes())
+                    .start_with_context(tracer, &root),
+            )
+        })
+        .collect();
+    let leaves = spans - 1 - MIDDLE;
+    for leaf in 0..leaves {
+        let mut span = tracer
+            .span_builder("leaf")
+            .with_attributes(attributes())
+            .start_with_context(tracer, &middle[leaf % MIDDLE]);
+        if fail && leaf == leaves - 1 {
+            span.set_status(Status::error("boom"));
+        }
+        span.end();
+    }
+    for cx in &middle {
+        cx.span().end();
+    }
+    root.span().end();
 }
 
 /// The randomness `ffffffffffffff`. All ratios above 0 sample it.
