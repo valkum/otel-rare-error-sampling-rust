@@ -1,6 +1,6 @@
 [package]
 name = "opentelemetry-rare-error-sampling"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "In-process tail sampling for OpenTelemetry: export every error span plus a head-sampled share of the rest"
 repository = "https://github.com/valkum/otel-rare-error-sampling-rust"
