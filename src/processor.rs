@@ -26,8 +26,9 @@ use crate::error::{self, ErrorRule};
 /// attribute ([`DEFAULT_STATUS_ATTRIBUTE`](crate::DEFAULT_STATUS_ATTRIBUTE)) is
 /// `"ERROR"`.
 ///
-/// The processor decides for each span, thus an error span can arrive without
-/// its parent.
+/// The processor decides for each span, so an error span can arrive without
+/// its parent. To export the whole local trace, use
+/// [`TraceErrorSamplingProcessor`](crate::TraceErrorSamplingProcessor).
 ///
 /// Wrap each processor that exports spans.
 #[derive(Debug)]
