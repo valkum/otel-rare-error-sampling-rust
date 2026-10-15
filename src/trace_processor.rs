@@ -321,7 +321,61 @@ const POOL_MAX_CAPACITY: usize = 64;
 
 #[cfg(test)]
 mod tests {
+    use std::{borrow::Cow, time::SystemTime};
+
+    use opentelemetry::{
+        InstrumentationScope,
+        trace::{SpanContext, SpanId, SpanKind, Status, TraceFlags, TraceState},
+    };
+    use opentelemetry_sdk::trace::{SpanEvents, SpanLinks};
+
     use super::*;
+
+    #[test]
+    fn full_shard_removes_the_oldest_trace() {
+        let limits = Limits {
+            max_traces_per_shard: 2,
+            ..limits()
+        };
+        let mut shard = Shard::default();
+
+        // Two traces hold one span each, so the shard is full.
+        shard.start(id(1), limits);
+        assert!(run(&mut shard, 1, "a-ok", false, limits).is_empty());
+        shard.start(id(2), limits);
+        assert!(run(&mut shard, 2, "b-ok", false, limits).is_empty());
+
+        // A third trace removes trace 1, which is the oldest.
+        shard.start(id(3), limits);
+
+        // Trace 2 still has its held span.
+        assert_eq!(
+            run(&mut shard, 2, "b-failed", true, limits),
+            ["b-ok", "b-failed"]
+        );
+
+        // The root span of trace 1 ends with an error. Its held span is gone.
+        assert_eq!(end(&mut shard, 1, "a-failed", true, limits), ["a-failed"]);
+    }
+
+    #[test]
+    fn timeout_removes_old_traces() {
+        let limits = Limits {
+            trace_timeout: Duration::ZERO,
+            ..limits()
+        };
+        let mut shard = Shard::default();
+
+        // Trace 1 holds one span.
+        shard.start(id(1), limits);
+        assert!(run(&mut shard, 1, "a-ok", false, limits).is_empty());
+
+        // A new trace starts the search for old traces.
+        shard.start(id(2), limits);
+
+        // The timeout removed trace 1, so its held span is gone.
+        assert_eq!(run(&mut shard, 1, "a-failed", true, limits), ["a-failed"]);
+    }
 
     /// Trace ids with only a counter in the high bits, and zero low bits.
     #[test]
@@ -353,5 +407,69 @@ mod tests {
             counts.iter().all(|&count| (50..=150).contains(&count)),
             "{counts:?}"
         );
+    }
+
+    /// Limits with room for 4 traces.
+    fn limits() -> Limits {
+        Limits {
+            max_traces_per_shard: 4,
+            max_spans_per_trace: 10,
+            trace_timeout: Duration::from_secs(60),
+        }
+    }
+
+    fn id(trace: u128) -> TraceId {
+        TraceId::from(trace)
+    }
+
+    /// Starts and ends a span. Returns the names of the exported spans.
+    fn run(
+        shard: &mut Shard,
+        trace: u128,
+        name: &'static str,
+        is_error: bool,
+        limits: Limits,
+    ) -> Vec<String> {
+        shard.start(id(trace), limits);
+        end(shard, trace, name, is_error, limits)
+    }
+
+    /// Ends a span. Returns the names of the exported spans.
+    fn end(
+        shard: &mut Shard,
+        trace: u128,
+        name: &'static str,
+        is_error: bool,
+        limits: Limits,
+    ) -> Vec<String> {
+        let (span, held) = shard.end(id(trace), span(trace, name), is_error, limits);
+        held.into_iter()
+            .chain(span)
+            .map(|span| span.name.into_owned())
+            .collect()
+    }
+
+    fn span(trace: u128, name: &'static str) -> SpanData {
+        SpanData {
+            span_context: SpanContext::new(
+                id(trace),
+                SpanId::from(1u64),
+                TraceFlags::default(),
+                false,
+                TraceState::NONE,
+            ),
+            parent_span_id: SpanId::INVALID,
+            parent_span_is_remote: false,
+            span_kind: SpanKind::Internal,
+            name: Cow::Borrowed(name),
+            start_time: SystemTime::UNIX_EPOCH,
+            end_time: SystemTime::UNIX_EPOCH,
+            attributes: Vec::new(),
+            dropped_attributes_count: 0,
+            events: SpanEvents::default(),
+            links: SpanLinks::default(),
+            status: Status::Unset,
+            instrumentation_scope: InstrumentationScope::default(),
+        }
     }
 }
